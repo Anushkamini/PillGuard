@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
@@ -19,6 +19,7 @@ import StatCard from "../components/StatCard";
 import SectionCard from "../components/SectionCard";
 import MedicationRow from "../components/MedicationRow";
 import AlertItem from "../components/AlertItem";
+import { api } from "../services/api";
 import { kpis, todaysMeds, weeklyAdherence, dashboardAlerts } from "../data/mockData";
 
 const ICONS = {
@@ -27,11 +28,63 @@ const ICONS = {
 };
 const SUBTONE = { adherence: "success", alerts: "warning" };
 
+function scheduleRowToMed(r, i) {
+  const hhmm = (r.time || "08:00").split(":");
+  const h = parseInt(hhmm[0], 10);
+  const ampm = h >= 12 ? "PM" : "AM";
+  const h12 = h % 12 || 12;
+  const mm = hhmm[1] || "00";
+  return {
+    id: `s${i + 1}`,
+    time: `${h12.toString().padStart(2, "0")}:${mm} ${ampm}`,
+    name: r.medicine_name || "Medicine",
+    strength: r.dosage || "",
+    dose: r.dose || "1 tablet",
+    food: r.meal_instruction || "As directed",
+    compartment: String(r.compartment || (i + 1)).padStart(2, "0"),
+    status: "upcoming",
+  };
+}
+
 export default function Dashboard() {
   const navigate = useNavigate();
   const [meds, setMeds] = useState(todaysMeds);
+  const [nextDose, setNextDose] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const loadSchedule = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.getSchedule();
+      if (data.schedule && data.schedule.length > 0) {
+        setMeds(data.schedule.map(scheduleRowToMed));
+      }
+    } catch (_) {
+      // Backend not available — keep mock data.
+    } finally {
+      setLoading(false);
+    }
+    try {
+      const next = await api.getNextDose();
+      if (next && next.medicine_name) setNextDose(next);
+    } catch (_) {
+      // Next dose optional.
+    }
+  }, []);
+
+  useEffect(() => {
+    loadSchedule();
+  }, [loadSchedule]);
 
   const take = (id) => setMeds((m) => m.map((x) => (x.id === id ? { ...x, status: "taken" } : x)));
+
+  const dynamicKpis = nextDose
+    ? kpis.map((k) =>
+        k.key === "alerts" && nextDose
+          ? { ...k, sub: `Next: ${nextDose.medicine_name}` }
+          : k
+      )
+    : kpis;
 
   return (
     <Box>
@@ -47,7 +100,7 @@ export default function Dashboard() {
 
       {/* KPIs */}
       <Box sx={{ display: "grid", gap: 2.5, gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr", lg: "repeat(4,1fr)" }, mb: 2.5 }}>
-        {kpis.map((k) => (
+        {dynamicKpis.map((k) => (
           <StatCard key={k.key} label={k.label} value={k.value} sub={k.sub} tone={k.tone} icon={ICONS[k.key]} subTone={SUBTONE[k.key]} />
         ))}
       </Box>
@@ -117,7 +170,7 @@ export default function Dashboard() {
               </Box>
               <Box>
                 <Typography sx={{ fontWeight: 700, fontSize: 16 }}>Smart Box is online</Typography>
-                <Typography variant="body2" color="text.secondary">Battery 82% · Last synced 1 minute ago · Next reminder 08:00 PM</Typography>
+                <Typography variant="body2" color="text.secondary">Battery 82% · Last synced 1 minute ago{nextDose ? ` · Next reminder ${nextDose.time}` : " · Next reminder 08:00 PM"}</Typography>
               </Box>
             </Stack>
             <Button variant="outlined" onClick={() => navigate("/app/smart-box")}>Open Smart Box</Button>

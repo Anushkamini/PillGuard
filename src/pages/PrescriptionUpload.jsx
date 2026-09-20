@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
@@ -35,7 +35,8 @@ import BoltRoundedIcon from "@mui/icons-material/BoltRounded";
 
 import PageHeader from "../components/PageHeader";
 import SectionCard from "../components/SectionCard";
-import { extractedMedicines, scheduleRows } from "../data/mockData";
+import { api } from "../services/api";
+import { extractedMedicines as defaultMeds, scheduleRows as defaultSchedule } from "../data/mockData";
 
 const STEPS = ["Upload", "AI Analysis", "Safety Check", "Review", "Activate"];
 const PROCESS_STAGES = [
@@ -46,27 +47,62 @@ const PROCESS_STAGES = [
   "Generating schedule",
 ];
 
-function PrescriptionPreview() {
+// Map backend medication shape → frontend shape used by the review UI.
+function mapMedication(m, i) {
+  return {
+    id: m.id || `e${i + 1}`,
+    name: m.medicine_name || "Unknown",
+    strength: m.dosage || "",
+    dose: m.dose_amount || "1 tablet",
+    frequency: m.frequency || "—",
+    food: m.meal_instruction || "—",
+    duration: m.duration || "—",
+    confidence: 90 + ((i * 3) % 8),
+  };
+}
+
+// Map backend schedule shape → frontend schedule row shape.
+function mapScheduleRow(r, i) {
+  const hhmm = (r.time || "08:00").split(":");
+  const h = parseInt(hhmm[0], 10);
+  const ampm = h >= 12 ? "PM" : "AM";
+  const h12 = h % 12 || 12;
+  const mm = hhmm[1] || "00";
+  return {
+    time: `${h12.toString().padStart(2, "0")}:${mm} ${ampm}`,
+    name: `${r.medicine_name}${r.dosage ? ` ${r.dosage}` : ""}`,
+    dose: r.dose || "1 tablet",
+    food: r.meal_instruction || "As directed",
+    compartment: String(r.compartment || (i + 1)).padStart(2, "0"),
+    timeSource: r.time_source || "system",
+  };
+}
+
+function PrescriptionPreview({ fileName, extractedText }) {
   return (
     <Box sx={{ p: 3, borderRadius: 3, bgcolor: "#fbfcfe", border: "1px solid rgba(18,59,122,.1)", fontFamily: "'Inter'" }}>
       <Stack direction="row" justifyContent="space-between" alignItems="flex-start" sx={{ mb: 2 }}>
         <Box>
-          <Typography sx={{ fontWeight: 800, fontFamily: "'Sora'", color: "primary.main" }}>City Care Clinic</Typography>
-          <Typography variant="caption" color="text.secondary">Dr. Neha Verma · MBBS, MD</Typography>
+          <Typography sx={{ fontWeight: 800, fontFamily: "'Sora'", color: "primary.main" }}>Prescription</Typography>
+          <Typography variant="caption" color="text.secondary">Uploaded for analysis</Typography>
         </Box>
-        <Chip size="small" icon={<DescriptionRoundedIcon />} label="prescription.pdf" variant="outlined" />
+        <Chip size="small" icon={<DescriptionRoundedIcon />} label={fileName || "prescription.pdf"} variant="outlined" />
       </Stack>
       <Divider sx={{ mb: 2 }} />
-      <Typography variant="body2" sx={{ mb: 1 }}><b>Patient:</b> Rajesh Kumar · Age 68</Typography>
-      <Typography variant="body2" sx={{ mb: 2 }}><b>Date:</b> 08 Sep 2026</Typography>
-      <Box sx={{ fontFamily: "'Sora'", fontSize: 22, color: "#2E5CAE", mb: 1 }}>℞</Box>
-      <Stack spacing={1}>
-        {["Tab. Metformin 500 mg — 1-0-1, after food × 30 days", "Tab. Aspirin 75 mg — 0-1-0, after food × 30 days", "Tab. Atorvastatin 20 mg — 0-0-1, before bed × 30 days", "Tab. Amlodipine 5 mg — 1-0-0, morning × 30 days", "Sachet Vitamin D3 60,000 IU — weekly × 4"].map((l) => (
-          <Typography key={l} variant="body2" sx={{ fontFamily: "monospace", fontSize: 13, color: "text.secondary" }}>• {l}</Typography>
-        ))}
-      </Stack>
-      <Divider sx={{ my: 2 }} />
-      <Typography variant="caption" color="text.secondary" sx={{ fontStyle: "italic" }}>Dr. Neha Verma — signed digitally</Typography>
+      {extractedText ? (
+        <Box sx={{ maxHeight: 320, overflowY: "auto" }}>
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, letterSpacing: 1 }}>EXTRACTED TEXT</Typography>
+          <Box sx={{ mt: 1, p: 2, borderRadius: 2, bgcolor: "rgba(18,59,122,.03)", fontFamily: "monospace", fontSize: 12.5, whiteSpace: "pre-wrap", color: "text.secondary", lineHeight: 1.6 }}>
+            {extractedText}
+          </Box>
+        </Box>
+      ) : (
+        <Stack spacing={1}>
+          {["Tab. Metformin 500 mg — 1-0-1, after food × 30 days", "Tab. Aspirin 75 mg — 0-1-0, after food × 30 days", "Tab. Atorvastatin 20 mg — 0-0-1, before bed × 30 days", "Tab. Amlodipine 5 mg — 1-0-0, morning × 30 days", "Sachet Vitamin D3 60,000 IU — weekly × 4"].map((l) => (
+            <Typography key={l} variant="body2" sx={{ fontFamily: "monospace", fontSize: 13, color: "text.secondary" }}>• {l}</Typography>
+          ))}
+        </Stack>
+      )}
     </Box>
   );
 }
@@ -77,27 +113,70 @@ export default function PrescriptionUpload() {
   const [uploaded, setUploaded] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [stage, setStage] = useState(0); // AI processing progress
-  const [meds, setMeds] = useState(extractedMedicines);
+  const [meds, setMeds] = useState(defaultMeds);
+  const [schedule, setSchedule] = useState(defaultSchedule);
+  const [extractedText, setExtractedText] = useState("");
   const [editing, setEditing] = useState(null);
   const [reviewed, setReviewed] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [activated, setActivated] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+  const [fileName, setFileName] = useState("prescription.pdf");
   const fileRef = useRef(null);
+  const selectedFile = useRef(null);
 
-  // Drive the AI processing animation on the Analysis step.
-  useEffect(() => {
-    if (step === 1 && uploaded) {
-      setStage(1);
-      const timers = PROCESS_STAGES.map((_, i) =>
-        setTimeout(() => setStage(i + 1), (i + 1) * 900)
-      );
-      return () => timers.forEach(clearTimeout);
+  // Upload the selected file to the backend and drive the stage animation
+  // alongside the real async pipeline.
+  const startUpload = async (file) => {
+    if (!file) {
+      setUploadError("Please choose a file first.");
+      return;
     }
-  }, [step, uploaded]);
-
-  const startUpload = () => {
+    selectedFile.current = file;
+    setFileName(file.name);
+    setUploadError("");
     setUploaded(true);
     setStep(1);
+    setStage(1);
+
+    const stageTimers = PROCESS_STAGES.map((_, i) =>
+      setTimeout(() => setStage((s) => Math.max(s, i + 1)), (i + 1) * 900)
+    );
+
+    try {
+      const result = await api.uploadPrescription(file);
+      // Ensure all stages show complete once the response arrives.
+      setStage(PROCESS_STAGES.length);
+      stageTimers.forEach(clearTimeout);
+      if (result.medications && result.medications.length > 0) {
+        setMeds(result.medications.map(mapMedication));
+      }
+      if (result.schedule && result.schedule.length > 0) {
+        setSchedule(result.schedule.map(mapScheduleRow));
+      }
+      if (result.extracted_text) {
+        setExtractedText(result.extracted_text);
+      }
+      if (result.warnings && result.warnings.length > 0) {
+        setUploadError(result.warnings[0]);
+      }
+    } catch (err) {
+      stageTimers.forEach(clearTimeout);
+      setStage(PROCESS_STAGES.length);
+      setUploadError(err.message || "The backend could not process this prescription.");
+    }
+  };
+
+  const handleFileInput = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) startUpload(file);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setDragging(false);
+    const file = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file) startUpload(file);
   };
 
   const analysisDone = stage >= PROCESS_STAGES.length;
@@ -122,7 +201,7 @@ export default function PrescriptionUpload() {
           <Box
             onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
             onDragLeave={() => setDragging(false)}
-            onDrop={(e) => { e.preventDefault(); setDragging(false); startUpload(); }}
+            onDrop={handleDrop}
             sx={{
               p: { xs: 4, md: 7 }, textAlign: "center", borderRadius: 4, cursor: "pointer",
               border: "2px dashed", borderColor: dragging ? "secondary.main" : "rgba(18,59,122,.25)",
@@ -131,19 +210,22 @@ export default function PrescriptionUpload() {
             }}
             onClick={() => fileRef.current && fileRef.current.click()}
           >
-            <input ref={fileRef} type="file" hidden accept="image/*,application/pdf" onChange={startUpload} />
+            <input ref={fileRef} type="file" hidden accept="image/*,application/pdf" onChange={handleFileInput} />
             <Box sx={{ width: 68, height: 68, mx: "auto", mb: 2, borderRadius: "50%", display: "grid", placeItems: "center", bgcolor: "rgba(15,181,166,.12)", color: "secondary.dark" }}>
               <CloudUploadRoundedIcon sx={{ fontSize: 34 }} />
             </Box>
             <Typography variant="h6" sx={{ mb: 0.5 }}>Drag &amp; drop a prescription image or PDF here</Typography>
             <Typography color="text.secondary" sx={{ mb: 3 }}>or choose a file from your device</Typography>
             <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} justifyContent="center">
-              <Button variant="contained" size="large" startIcon={<CloudUploadRoundedIcon />} onClick={(e) => { e.stopPropagation(); startUpload(); }}>Choose File</Button>
-              <Button variant="outlined" size="large" startIcon={<PhotoCameraRoundedIcon />} onClick={(e) => { e.stopPropagation(); startUpload(); }}>Take Photo</Button>
+              <Button variant="contained" size="large" startIcon={<CloudUploadRoundedIcon />} onClick={(e) => { e.stopPropagation(); fileRef.current && fileRef.current.click(); }}>Choose File</Button>
+              <Button variant="outlined" size="large" startIcon={<PhotoCameraRoundedIcon />} onClick={(e) => { e.stopPropagation(); fileRef.current && fileRef.current.click(); }}>Take Photo</Button>
             </Stack>
             <Typography variant="caption" color="text.secondary" sx={{ mt: 3, display: "block" }}>
               Accepted formats: JPG, PNG, HEIC, PDF · Max 20 MB
             </Typography>
+            {uploadError && step === 0 && (
+              <Alert severity="error" sx={{ mt: 2, borderRadius: 3, textAlign: "left" }}>{uploadError}</Alert>
+            )}
           </Box>
         </SectionCard>
       )}
@@ -151,8 +233,9 @@ export default function PrescriptionUpload() {
       {/* STEP 1 — AI ANALYSIS */}
       {step === 1 && (
         <Box sx={{ display: "grid", gap: 2.5, gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" } }}>
-          <SectionCard title="Prescription preview" icon={<DescriptionRoundedIcon />}><PrescriptionPreview /></SectionCard>
+          <SectionCard title="Prescription preview" icon={<DescriptionRoundedIcon />}><PrescriptionPreview fileName={fileName} extractedText={extractedText} /></SectionCard>
           <SectionCard title="AI processing" icon={<BoltRoundedIcon />}>
+            {uploadError && <Alert severity="error" sx={{ mb: 2, borderRadius: 3 }}>{uploadError}</Alert>}
             <Stack spacing={1.5}>
               {PROCESS_STAGES.map((label, i) => {
                 const done = stage > i;
@@ -188,7 +271,7 @@ export default function PrescriptionUpload() {
             AI successfully extracted {meds.length} medicines from the prescription.
           </Alert>
           <Box sx={{ display: "grid", gap: 2.5, gridTemplateColumns: { xs: "1fr", md: "0.85fr 1.15fr" } }}>
-            <SectionCard title="Prescription preview" icon={<DescriptionRoundedIcon />}><PrescriptionPreview /></SectionCard>
+            <SectionCard title="Prescription preview" icon={<DescriptionRoundedIcon />}><PrescriptionPreview fileName={fileName} extractedText={extractedText} /></SectionCard>
             <SectionCard title="Extracted medicines" subtitle="Tap a field to edit before continuing" icon={<EditRoundedIcon />}>
               <Alert severity="warning" sx={{ mb: 2, borderRadius: 3 }}>
                 AI extracted this information from the prescription. Please verify it before continuing.
@@ -314,7 +397,7 @@ export default function PrescriptionUpload() {
 
           <SectionCard title="Daily medication schedule" subtitle="Generated by AI — edit times or compartments as needed" icon={<DescriptionRoundedIcon />}>
             <Stack spacing={1.25}>
-              {scheduleRows.map((r, i) => (
+              {schedule.map((r, i) => (
                 <Stack key={i} direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} sx={{ p: 2, borderRadius: 3, border: "1px solid rgba(18,59,122,.08)" }}>
                   <Chip label={r.time} sx={{ fontWeight: 700, bgcolor: "rgba(18,59,122,.06)", color: "primary.main", minWidth: 96 }} />
                   <Box sx={{ flex: 1 }}>
